@@ -1,0 +1,149 @@
+---
+title: "ITUS cleaning "
+author: "Jihye Kim, Ioana Macoveciuc"
+date: "08/09/2021"
+output: html_document
+---
+  
+  
+#Load relevant packages 
+```{r}
+library(tidyverse)
+library(lme4)
+```
+
+#Import ITUS data 
+```{r}
+data <- read_csv("C:/Users/USER/Dropbox (The University of Manchester)/IATUR/ITUS/Data/timeuse.csv")
+```
+
+#Convert time to minutes
+```{r}
+data$time <- data$time *60
+```
+
+#Indicate dominance activity for each stint - productive_stint or domestic_stint
+```{r}
+#Make uniquestint_id (psid+stintid) 
+data$stint_id <- as.character(data %>% group_indices(data$time_from)) 
+data$psid_string <- as.character(data$psid) 
+data <- data %>% mutate(uniquestint = paste0(psid_string, stint_id)) 
+data <- data[order(data$uniquestint),]
+
+#Flag productive activity as major activity
+data <- data %>% mutate(product0=as.numeric(majoracitivity==1 & (
+					activity_code >= 110 & activity_code <=142|
+ 					activity_code >= 211 & activity_code <=242
+						)))
+
+#Productive_stint=a stint that has productive work as major activity 						
+data$product_stint <- ave(data$product0, data$uniquestint, FUN = function(x) max(as.numeric(x)))
+
+#Domestic_stint=a stint that has domestic work
+data <- data %>% mutate(domestic0=as.numeric(activity_code >=311 & activity_code <=372 |
+					 activity_code >=390 & activity_code <=439 |
+					 activity_code >=490 & activity_code <= 519 |
+					 activity_code == 521 |
+					 activity_code == 522 |
+					 activity_code == 529))
+data$domestic_stint <- ave(data$domestic0, data$uniquestint, FUN = function(x) max(as.numeric(x)))
+```
+
+#Generate aggregated data with productive work time variable (etime)
+```{r}
+time_productive_0 <- data %>% filter( majoracitivity==1 & (
+          activity_code >= 110 & activity_code <=142|
+ 					activity_code >= 211 & activity_code <=242
+						))
+temp_0 <- data.frame(with(time_productive_0, cbind(time, psid)))
+etime <- aggregate.data.frame(temp_0, by=list(temp_0$psid), sum)
+etime <- etime[, c(1, 2)]
+etime <- rename(etime, c("psid" = "Group.1", "etime" ="time"))
+```
+
+#Generate aggregated data with productive work time variable (htime)
+```{r}
+time_domestic_0 <- data %>% filter (data$product_stint!=1 & domestic_stint==1 &
+					 (activity_code >=311 & activity_code <=372 |
+					 activity_code >=390 & activity_code <=439 |
+					 activity_code >=490 & activity_code <= 519 |
+					 activity_code == 521 |
+					 activity_code == 522 |
+					 activity_code == 529 
+						))
+						
+#To avoid duplicated counts, we need to devide aggregate by the number of domestic activities per stint  
+time_domestic_0$no_domestic_activity <- ave(time_domestic_0$domestic_stint, time_domestic_0$uniquestint, FUN = function(x) sum(as.numeric(x)))
+
+temp_1 <- data.frame(with(time_domestic_0, cbind(time/time_domestic_0$no_domestic_activity, psid)))
+htime <- aggregate.data.frame(temp_1, by=list(temp_1$psid), sum)
+htime <- htime[, c(1, 2)]
+htime <- rename(htime, c("psid" = "Group.1", "htime" ="V1"))
+```
+
+#Merge aggregates(htime, etime) with the original data and select one row per person
+```{r}
+df <- data %>% filter(activity_id==1)
+df <- merge(df, htime, by= "psid", all = TRUE)
+df <- merge(df, etime, by= "psid", all = TRUE)
+df$htime[is.na(df$htime)] <- 0
+df$etime[is.na(df$etime)] <- 0
+```
+
+#Generate the number of dependent children
+```{r}
+df$children <- as.numeric(df$age<15)
+df$depndt_child_under15 <- ave(df$children, df$hhid, FUN = function(x) sum(as.numeric(x)))
+
+df$children_new <- as.numeric(df$age<13)
+df$depndt_child_under13 <- ave(df$children_new, df$hhid, FUN = function(x) sum(as.numeric(x)))
+df$havingchildunder13 <- as.numeric(df$depndt_child_under13>=1)
+df$havingchildunder15 <- as.numeric(df$depndt_child_under15>=1)
+```
+
+#Create a new dataset for modelling
+```{r}
+data_itus <- df %>%  mutate (
+        wave = 1,
+        lockdown = 0,
+        wtime  = htime+etime,
+        fhtime = htime/1440,
+        fetime = etime/1440,
+        fwtime = (htime+etime)/1440,
+        age2 = age*age,
+        urban=as.numeric(sector==2),
+        expenditure=as.numeric(expenditure_monthly/hhsize),
+        evermarried=as.numeric(maritalstatus==2|maritalstatus==3|maritalstatus==4),
+        unemployed=as.numeric(usualstatus==81),
+        st=as.numeric(socialgroup==1),
+        sc=as.numeric(socialgroup==2),
+        belowprimary=as.numeric(highest_edu==1|highest_edu==2),
+        primary_scndry=as.numeric(highest_edu==3|highest_edu==4|highest_edu==5|highest_edu==7),
+        abovesecondary=as.numeric(highest_edu==6|highest_edu==8|highest_edu==9|highest_edu==10|highest_edu==11)
+        )
+
+data_itus <- data_itus %>% filter(age >=15 & age <=65 & !is.na(expenditure) & !is.na(belowprimary) ) %>% select(psid, hhid, wave, fwt, wtime, htime, etime, fwtime, fhtime, fetime, age, age2, female, urban,  hhsize, expenditure, evermarried, depndt_child_under15, state, unemployed, st, sc, lockdown, belowprimary, primary_scndry, abovesecondary,depndt_child_under13, weight, havingchildunder13, havingchildunder15)
+```
+
+#Centered or standardised variables
+```{r}
+data_itus$age_c <- data_itus$age-mean(data_itus$age)
+data_itus$age2_z <- (data_itus$age2-mean(data_itus$age2))/sd(data_itus$age2)
+data_itus$hhsize_c <- data_itus$hhsize-mean(data_itus$hhsize)
+data_itus$depndt_child_u15_pc <- data_itus$depndt_child_under15/data_itus$hhsize
+data_itus$expenditure_z <- (data_itus$expenditure-mean(data_itus$expenditure))/sd(data_itus$expenditure)
+summary(data_itus)
+```
+
+#Remove unneccesary files
+```{r}
+rm("time_domestic_0", "time_productive_0", "temp_0", "temp_1", "htime", "etime", "data")
+```
+
+#Save .csv file
+```{r}
+write.csv(data_itus, "C:/Users/USER/Dropbox (The University of Manchester)/IATUR/Model/Data/data_itus_16Sep.csv")
+write.csv(summary(data_itus), "C:/Users/USER/Dropbox (The University of Manchester)/IATUR/Model/Data/data_itus_16Sep_summary.csv")
+data_itus <- read_csv("C:/Users/USER/Dropbox (The University of Manchester)/IATUR/Model/Data/data_itus_16Sep.csv")
+
+```
